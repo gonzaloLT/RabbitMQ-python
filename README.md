@@ -252,3 +252,79 @@ Con `prefetch_count=1`, RabbitMQ mantiene exactamente 1 mensaje "Unacknowledged"
 **Advertencia:** Si todos los workers están ocupados y los mensajes siguen llegando, la cola crecerá indefinidamente. QoS distribuye carga entre workers existentes, pero no crea workers automáticamente. Debes monitorear tamaño de cola y agregar capacidad cuando sea necesario.
 
 ---
+
+## TUTORIAL 3: "Publish/Subscribe"
+**Patrón:** Productor → Fanout Exchange → Múltiples Colas → Múltiples Consumidores.
+
+Introduce broadcasting: un mensaje se duplica y entrega a múltiples consumidores independientes. Abandona el Default Exchange y muestra el poder real de los exchanges explícitos.
+
+### Resumen Teórico y Aprendizajes Clave
+
+#### 1. Exchanges Explícitos: Arquitectura Real
+
+Hasta ahora usabas `exchange=''` que ocultaba la existencia de exchanges. Este tutorial declara explícitamente: `exchange_declare(exchange='logs', exchange_type='fanout')`.
+
+**¿Por qué declarar exchanges?** Por la misma razón que declaras colas: garantizar existencia antes de usar. Si publicas a un exchange inexistente, RabbitMQ descarta silenciosamente el mensaje. La declaración es idempotente: si existe, no hace nada; si no existe, lo crea.
+
+**Exchange types:** direct, topic, headers, fanout. Cada tipo implementa lógica de enrutamiento diferente. Fanout es el más simple: ignora routing keys completamente.
+
+#### 2. Fanout Exchange: Broadcasting Puro
+
+Tiene comportamiento trivial pero poderoso: envía copias del mensaje a **todas** las colas vinculadas, ignorando routing keys.
+
+**Mecánica:** Producer publica mensaje → Exchange lo duplica N veces (una por cola vinculada) → Cada cola recibe copia independiente → Cada consumidor procesa a su propio ritmo.
+
+**¿Cuándo usar?** Cuando el mismo evento debe desencadenar acciones completamente independientes: usuario se registra → enviar email + actualizar analytics + notificar CRM + crear carpeta. Cada sistema procesa la notificación independientemente sin afectar a otros.
+
+**Diferencia fundamental con Work Queues:** Work Queues distribuye mensajes (cada mensaje a un solo worker). Publish/Subscribe duplica mensajes (cada consumidor recibe todos).
+
+#### 3. Bindings: Conectando Exchange a Colas
+
+Un binding es la relación que conecta un exchange a una cola: `queue_bind(exchange='logs', queue=queue_name)`.
+
+**Significado:** "Exchange 'logs', cuando recibas mensajes, envía copias a esta cola". Un exchange puede tener múltiples bindings, cada uno a una cola diferente. La cantidad de bindings determina cuántas copias del mensaje se crean.
+
+**¿Por qué separar binding de declaración?** Porque permite configuración dinámica. Puedes agregar/eliminar bindings sin modificar el exchange ni las colas. Esto desacopla productores (que publican al exchange) de consumidores (que leen de colas), permitiendo cambios en la topología sin tocar código de aplicación.
+
+#### 4. Colas Temporales y Anónimas
+
+Este tutorial introduce colas sin nombre: `queue_declare(queue='', exclusive=True)`.
+
+**Cola vacía:** RabbitMQ genera nombre aleatorio único automáticamente (como "amq.gen-JzTY20BRgKO-HjmUJj0wLg"). Cada consumidor obtiene su propia cola con nombre único.
+
+**¿Por qué nombres aleatorios?** Porque en broadcasting cada consumidor necesita su propia cola independiente. Si usaras el mismo nombre de cola para todos, caerías en el patrón Work Queue (competencia) en lugar de Publish/Subscribe (broadcasting).
+
+**Exclusive=True:** La cola se elimina automáticamente cuando la conexión que la creó se cierra. Esto es perfecto para consumidores temporales que solo interesan eventos mientras están activos.
+
+**¿Por qué colas temporales?** Imagina un dashboard que muestra logs en tiempo real. Mientras está abierto, necesita recibir todos los logs nuevos. Cuando se cierra, no necesitas acumular logs que nadie leerá. Colas exclusive se auto-limpian eliminando este problema.
+
+#### 5. Listando Recursos del Sistema
+
+El tutorial muestra comandos útiles: `rabbitmqctl list_exchanges` y `rabbitmqctl list_bindings`.
+
+**¿Por qué es importante?** Porque RabbitMQ es stateful y complejo. Ver la topología actual (qué exchanges existen, qué bindings hay) es fundamental para debugging. Si los mensajes no llegan, revisar bindings revela si la conexión exchange-cola está configurada correctamente.
+
+**Exchanges predeterminados:** Al listar exchanges verás algunos sin nombre (default exchange) y otros con "amq." como prefijo. Estos son exchanges del sistema creados automáticamente por RabbitMQ. No debes eliminarlos.
+
+#### 6. El Patrón Completo: De Evento a Múltiples Acciones
+
+El flujo completo ilustra desacoplamiento total:
+
+**Productor:** Solo conoce el exchange 'logs'. No sabe cuántos consumidores existen ni qué hacen con los mensajes. Publica y olvida.
+
+**Exchange:** Recibe mensaje y lo duplica según bindings configurados. No conoce la lógica de negocio de ningún consumidor.
+
+**Colas:** Almacenan copias independientes. Si un consumidor está lento, solo su cola crece; otros no se afectan.
+
+**Consumidores:** Cada uno procesa su copia a su propio ritmo, con su propia lógica. Agregar un consumidor nuevo solo requiere: crear cola, hacer binding al exchange, empezar a consumir. No modificas productores ni otros consumidores.
+
+**¿Por qué este desacoplamiento importa?** Permite evolución independiente. Puedes agregar nuevo sistema de auditoría que escuche todos los eventos sin tocar sistemas existentes. Puedes eliminar un consumidor fallido sin afectar a otros. Puedes modificar la lógica de procesamiento de un consumidor sin coordinar con el productor.
+
+#### 7. Mensajes Sin Destino
+
+Si publicas al exchange 'logs' pero ninguna cola está vinculada a él, el mensaje se descarta silenciosamente.
+
+**¿Por qué este comportamiento?** Porque RabbitMQ no adivina destinos. Los exchanges solo saben enrutar según bindings configurados. Sin bindings, no hay destino, entonces descarta. Esto parece problemático, pero es diseño intencional: si no hay nadie escuchando, acumular mensajes consumiría memoria indefinidamente.
+
+**Implicación práctica:** Asegúrate que consumidores (que crean colas y bindings) arranquen antes de productores, o que productores reintenten publicación. Alternativamente, declara colas y bindings anticipadamente como parte del setup de infraestructura.
+
