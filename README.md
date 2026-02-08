@@ -328,3 +328,72 @@ Si publicas al exchange 'logs' pero ninguna cola está vinculada a él, el mensa
 
 **Implicación práctica:** Asegúrate que consumidores (que crean colas y bindings) arranquen antes de productores, o que productores reintenten publicación. Alternativamente, declara colas y bindings anticipadamente como parte del setup de infraestructura.
 
+## TUTORIAL 4: "Routing"
+**Patrón:** Productor → Direct Exchange → Múltiples Colas con Routing Keys → Consumidores Especializados.
+
+Este tutorial introduce enrutamiento selectivo: en lugar de enviar todos los mensajes a todos los consumidores (fanout), permite que cada consumidor se suscriba solo a subconjuntos específicos de mensajes según criterios definidos.
+
+### Resumen Teórico y Aprendizajes Clave
+
+#### 1. Direct Exchange: Enrutamiento por Coincidencia Exacta
+
+Un Direct Exchange compara la routing key del mensaje con las routing keys de los bindings. Solo envía el mensaje a colas cuyo binding key coincida exactamente.
+
+**Mecánica:** Cuando publicamos con `routing_key='error'`, el exchange busca todos los bindings configurados con exactamente 'error' como binding key. Envía copias del mensaje solo a esas colas. Las colas con binding keys 'warning' o 'info' no reciben nada.
+
+**¿Por qué coincidencia exacta?** Porque proporciona enrutamiento determinístico y predecible. No hay ambigüedad: o coincide perfectamente o no coincide. Esto simplifica el razonamiento sobre flujo de mensajes y hace el debugging más directo.
+
+#### 2. Routing Key vs Binding Key: Clarificando Términos
+
+Estos términos pueden confundir porque ambos son cadenas de texto, pero tienen roles diferentes:
+
+**Routing Key:** Atributo del mensaje establecido por el productor al publicar. Indica "qué tipo de mensaje es este" o "a quién debería interesarle esto".
+
+**Binding Key:** Atributo del binding establecido al conectar cola con exchange. Indica "esta cola quiere recibir mensajes de este tipo".
+
+El Direct Exchange hace matching: compara routing key del mensaje con binding keys de todos los bindings, enviando a las colas donde hay coincidencia exacta.
+
+#### 3. Múltiples Bindings con la Misma Key
+
+Una característica poderosa: múltiples colas pueden tener bindings al mismo exchange con la misma binding key.
+
+**Escenario:** Cola A y Cola B ambas vinculadas al exchange con binding key 'error'. Cuando llega un mensaje con routing key 'error', ambas colas reciben copia.
+
+**¿Por qué permitir esto?** Porque diferentes consumidores pueden necesitar procesar el mismo tipo de evento de formas diferentes. Errores pueden necesitar: escribirse a archivo log (Cola A) Y enviarse como alerta email (Cola B) Y guardarse en base de datos (Cola C). Todas reciben errores, cada una hace algo distinto.
+
+**Comportamiento resultante:** Con múltiples bindings idénticos, el Direct Exchange se comporta como Fanout pero solo para ese subconjunto de mensajes. Es selectividad (solo ciertos tipos) combinada con broadcasting (a múltiples destinos).
+
+#### 4. Suscripción Múltiple: Una Cola, Múltiples Routing Keys
+
+El patrón inverso también es válido: una cola puede tener múltiples bindings al mismo exchange, cada uno con diferente binding key.
+
+**Implementación:** Ejecutamos `queue_bind()` varias veces para la misma cola con diferentes binding keys. Por ejemplo, una cola de "logs críticos" podría vincularse con binding keys 'error' Y 'critical'.
+
+**¿Por qué es útil?** Porque permite agregación de categorías relacionadas. Un consumidor de "problemas graves" puede querer procesar tanto errores como eventos críticos sin duplicar lógica. Una sola cola recibe ambos tipos, un solo consumidor los procesa todos.
+
+#### 5. El Caso de Uso: Sistema de Logging por Severidad
+
+El tutorial implementa sistema de logs con niveles: info, warning, error.
+
+**Arquitectura:** Producer publica logs con routing key indicando severidad. Consumidores se suscriben selectivamente: un consumidor de "todos los logs" se vincula a info, warning, error. Un consumidor de "solo problemas" se vincula a warning, error. Un consumidor de "solo críticos" se vincula a solo error.
+
+**¿Por qué este patrón funciona?** Porque separa generación de logs (producer no sabe quién los consume ni cómo) de procesamiento de logs (consumers deciden qué niveles les interesan). Agregar nuevo nivel de severidad solo requiere que consumers agreguen nuevo binding; el producer no cambia.
+
+#### 6. Comparación con Fanout: Cuándo Usar Cada Uno
+
+**Fanout:** Usa cuando todos los consumidores necesitan recibir todos los mensajes. Broadcasting sin discriminación. Ejemplo: evento "CompraRealizada" debe notificar a todos los subsistemas.
+
+**Direct:** Usa cuando consumidores tienen intereses específicos y diferentes. Enrutamiento selectivo basado en categorías discretas. Ejemplo: logs por severidad, órdenes por departamento, eventos por tipo.
+
+**La diferencia fundamental:** Fanout ignora routing keys; Direct las requiere y las usa para decisiones de enrutamiento.
+
+#### 7. Limitación del Direct Exchange
+
+Solo soporta coincidencia exacta. Si necesitas patrones más complejos (como "todos los logs de bases de datos sin importar severidad" o "todos los errores sin importar componente"), Direct Exchange no es suficiente.
+
+**¿Qué pasa si usas routing key compuesta?** Podrías usar routing keys como "database.error" o "api.warning", pero tendrías que crear bindings para cada combinación específica. Con 10 componentes y 3 severidades, necesitas 30 bindings diferentes. Esto escala mal y es inflexible.
+
+**Solución:** Topic Exchange (Tutorial 5) permite patrones con wildcards para enrutamiento jerárquico flexible.
+
+---
+
