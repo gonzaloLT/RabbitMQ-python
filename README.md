@@ -339,7 +339,7 @@ Este tutorial introduce enrutamiento selectivo: en lugar de enviar todos los men
 
 Un Direct Exchange compara la routing key del mensaje con las routing keys de los bindings. Solo envía el mensaje a colas cuyo binding key coincida exactamente.
 
-**Mecánica:** Cuando publicamos con `routing_key='error'`, el exchange busca todos los bindings configurados con exactamente 'error' como binding key. Envía copias del mensaje solo a esas colas. Las colas con binding keys 'warning' o 'info' no reciben nada.
+**Mecánica:** Cuando publicamps con `routing_key='error'`, el exchange busca todos los bindings configurados con exactamente 'error' como binding key. Envía copias del mensaje solo a esas colas. Las colas con binding keys 'warning' o 'info' no reciben nada.
 
 **¿Por qué coincidencia exacta?** Porque proporciona enrutamiento determinístico y predecible. No hay ambigüedad: o coincide perfectamente o no coincide. Esto simplifica el razonamiento sobre flujo de mensajes y hace el debugging más directo.
 
@@ -381,9 +381,9 @@ El tutorial implementa sistema de logs con niveles: info, warning, error.
 
 #### 6. Comparación con Fanout: Cuándo Usar Cada Uno
 
-**Fanout:** Usa cuando todos los consumidores necesitan recibir todos los mensajes. Broadcasting sin discriminación. Ejemplo: evento "CompraRealizada" debe notificar a todos los subsistemas.
+**Fanout:** Se usa cuando todos los consumidores necesitan recibir todos los mensajes. Broadcasting sin discriminación. Ejemplo: evento "CompraRealizada" debe notificar a todos los subsistemas.
 
-**Direct:** Usa cuando consumidores tienen intereses específicos y diferentes. Enrutamiento selectivo basado en categorías discretas. Ejemplo: logs por severidad, órdenes por departamento, eventos por tipo.
+**Direct:** Se usa cuando consumidores tienen intereses específicos y diferentes. Enrutamiento selectivo basado en categorías discretas. Ejemplo: logs por severidad, órdenes por departamento, eventos por tipo.
 
 **La diferencia fundamental:** Fanout ignora routing keys; Direct las requiere y las usa para decisiones de enrutamiento.
 
@@ -397,3 +397,124 @@ Solo soporta coincidencia exacta. Si necesitas patrones más complejos (como "to
 
 ---
 
+## TUTORIAL 5: "Topics"
+**Patrón:** Productor → Topic Exchange → Múltiples Colas con Patrones → Consumidores con Suscripciones Flexibles.
+
+Este tutorial introduce el tipo de exchange más flexible: Topic Exchange permite patrones con wildcards en routing keys, habilitando suscripciones basadas en jerarquías y categorías múltiples.
+
+### Resumen Teórico y Aprendizajes Clave
+
+#### 1. Topic Exchange: Enrutamiento con Patrones
+
+Un Topic Exchange extiende el concepto de Direct Exchange permitiendo wildcards en binding keys. En lugar de coincidencia exacta, permite coincidencia por patrones.
+
+**¿Por qué existe?** Porque sistemas reales tienen categorización multidimensional. Un log puede tener: componente (api, database, cache) Y severidad (info, warning, error) Y región (us-east, eu-west). Necesitas poder suscribirte a combinaciones flexibles como "todos los errores de cualquier componente" o "todo de la base de datos sin importar severidad".
+
+#### 2. Estructura de Routing Keys: Convención Jerárquica
+
+Topic exchanges requieren routing keys con estructura específica: palabras separadas por puntos.
+
+**Convención:** `componente.severidad.región` o similar. Por ejemplo: "database.error.us-east", "api.info.eu-west", "cache.warning.us-west".
+
+**¿Por qué puntos como separadores?** Porque el algoritmo de matching usa puntos para delimitar palabras individuales. Esto permite que wildcards funcionen sobre palabras completas, no sobre caracteres arbitrarios.
+
+**Límite de longitud:** Routing keys pueden tener hasta 255 bytes. La cantidad de palabras (segmentos separados por puntos) no tiene límite práctico dentro de esos 255 bytes.
+
+#### 3. Wildcards: Los Dos Tipos
+
+Topic Exchange soporta dos wildcards especiales en binding keys:
+
+**Asterisco (*):** Sustituye exactamente UNA palabra.
+- Binding `*.error.*` coincide con "database.error.us-east" y "api.error.eu-west"
+- NO coincide con "database.error" (faltan palabras) ni "system.database.error.critical" (demasiadas palabras)
+
+**Almohadilla (#):** Sustituye CERO o más palabras.
+- Binding `database.#` coincide con "database.error", "database.error.us-east", "database.info.backup.completed"
+- Binding `#.error` coincide con "error", "api.error", "system.database.error"
+- Binding `#` coincide con TODO (equivalente a fanout)
+
+**¿Por qué dos wildcards diferentes?** Porque ofrecen granularidad diferente. Asterisco para posiciones específicas en jerarquía, almohadilla para sufijos/prefijos variables. Combinados, permiten expresar prácticamente cualquier patrón de suscripción.
+
+#### 4. Casos Especiales: Degeneración a Otros Tipos
+
+Topic Exchange puede comportarse como otros tipos de exchange dependiendo de cómo lo uses:
+
+**Como Direct Exchange:** Si todos los bindings usan routing keys sin wildcards (ejemplo: binding exacto "database.error"), el comportamiento es idéntico a Direct Exchange. Coincidencia exacta.
+
+**Como Fanout Exchange:** Si usas binding key `#`, la cola recibe absolutamente todos los mensajes sin importar su routing key. Broadcasting total.
+
+**¿Por qué importa?** Porque Topic es el más versátil pero también el más costoso computacionalmente. Si solo necesitas comportamiento Direct o Fanout, usa esos tipos específicos por eficiencia. Topic es para cuando realmente necesitas la flexibilidad de patrones.
+
+#### 5. El Caso de Uso: Sistema de Logging Multidimensional
+
+El tutorial implementa sistema de logs con dos dimensiones: facility (componente que genera el log) y severity (nivel de importancia).
+
+**Routing key:** Formato `<facility>.<severity>`. Ejemplos: "kern.critical", "auth.info", "cron.warning".
+
+**Suscripciones complejas posibles:**
+- `kern.*`: Todos los logs del kernel sin importar severidad
+- `*.critical`: Todos los críticos sin importar origen
+- `kern.critical`: Solo críticos del kernel (específico como Direct)
+- `#.error`: Todos los errores (puede haber más segmentos antes de error)
+- `kern.#`: Todo del kernel (puede haber más segmentos después)
+
+**¿Por qué este patrón es poderoso?** Porque un solo consumidor puede definir exactamente qué subconjunto de mensajes le interesa sin que el productor necesite conocer estos criterios. El productor solo clasifica correctamente; el consumidor filtra según necesidad.
+
+#### 6. Múltiples Bindings por Cola
+
+Una cola puede tener múltiples bindings con diferentes patrones al mismo Topic Exchange.
+
+**Escenario:** Una cola "critical_logs" podría tener bindings:
+- `*.critical`
+- `kern.*`
+- `security.#`
+
+Recibe: todos los críticos de cualquier componente, todos los niveles del kernel, y todo relacionado con seguridad.
+
+**¿Por qué permitir múltiples bindings?** Porque los intereses de procesamiento rara vez se expresan con un solo patrón. "Quiero todos los errores críticos O todo del kernel O cualquier cosa de seguridad" es lógica OR que se implementa con múltiples bindings.
+
+**Comportamiento:** Si un mensaje coincide con múltiples bindings de la misma cola, la cola recibe UNA SOLA copia del mensaje, no duplicados. RabbitMQ deduplica automáticamente.
+
+#### 7. Orden de Evaluación y Performance
+
+Cuando llega un mensaje, el Topic Exchange compara su routing key contra TODOS los bindings.
+
+**Complejidad:** Con N bindings, evalúa N patrones. Cada patrón requiere matching con wildcards, que es más costoso que coincidencia exacta de strings.
+
+**¿Por qué importa?** Topic Exchange es el más flexible pero también el más lento. Con miles de bindings, la latencia de enrutamiento puede ser significativa. Para sistemas de altísimo throughput, considera usar Direct Exchange cuando sea suficiente, o fragmentar en múltiples Topic Exchanges temáticos.
+
+**Optimización de RabbitMQ:** Internamente usa tries y otros algoritmos para optimizar matching, pero la complejidad fundamental permanece. No es problema en la mayoría de casos de uso, pero algo a considerar en escala masiva.
+
+#### 8. Patrones Avanzados: Expresividad Completa
+
+Topic Exchange permite expresar consultas complejas sobre streams de eventos:
+
+**Negación implícita:** Aunque no hay operador NOT explícito, puedes lograr filtrado inverso con bindings cuidadosos. Por ejemplo, para "todo excepto info": creas bindings para cada severidad que te interesa (error, warning, critical) excluyendo info.
+
+**Jerarquías profundas:** Routing keys pueden tener muchos segmentos. `region.datacenter.rack.server.component.severity` permite granularidad extrema. Puedes suscribirte a "todos los errores del rack 3 en cualquier datacenter de US" con `us.*.3.*.*.error`.
+
+**Trade-off de complejidad:** Más segmentos en routing key ofrecen más flexibilidad de filtrado pero requieren más disciplina en productores para clasificar correctamente. Si clasificas mal, los mensajes no llegan a destinos correctos y el debugging es difícil.
+
+#### 9. Cuándo NO Usar Topic Exchange
+
+**No uses Topic si:**
+- Solo necesitas broadcasting simple (usa Fanout)
+- Solo necesitas enrutamiento por categorías discretas sin jerarquía (usa Direct)
+- Los criterios de filtrado no se expresan bien en routing keys jerárquicas (considera Headers Exchange o filtrado en consumidores)
+
+**No uses routing keys complejas si:**
+- Los patrones de suscripción son simples y estáticos
+- La jerarquía de clasificación cambia frecuentemente (refactorizar routing keys en todos los productores es costoso)
+- Necesitas combinar múltiples criterios con lógica AND compleja (Headers Exchange puede ser mejor)
+
+#### 10. Casos de Uso Comunes en Producción
+
+**Sistemas de logging distribuidos:** Componente.severidad.hostname permite suscripciones flexibles para diferentes equipos (ops quiere todos los errores, dev quiere todo de su componente).
+
+**Event sourcing:** Agregado.tipo_evento.version permite consumidores que procesan eventos específicos de ciertos agregados.
+
+**IoT y telemetría:** Region.dispositivo.metrica.unidad permite dashboards que muestran métricas específicas de regiones específicas.
+
+**Microservicios:** Servicio.entidad.operacion.resultado permite auditoría selectiva, monitoreo específico, y procesamiento diferenciado de eventos de negocio.
+
+**¿Qué hace Topic ideal para estos casos?** La combinación de jerarquía natural de categorización + flexibilidad de suscripción. Productores clasifican según su dominio, consumidores se suscriben según sus necesidades, sin acoplamiento directo entre ellos.
